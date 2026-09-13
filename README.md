@@ -34,4 +34,8 @@ npm install
 npm run build
 ```
 
+## Deployment
+
+`main` is the production source branch for Vercel.
+
 Designed for deployment on Vercel using AI Gateway.
