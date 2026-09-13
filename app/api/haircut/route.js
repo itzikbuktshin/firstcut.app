@@ -11,10 +11,11 @@ const ALLOWED_ANALYSIS_MODELS = new Set([
   'inclusionai/ling-3.0-flash-vl-free',
 ]);
 
-const DEFAULT_IMAGE_MODEL = 'meta/muse-image-1.0';
+const DEFAULT_IMAGE_MODEL = 'bytedance/seedream-5.0-lite';
 const ALLOWED_IMAGE_MODELS = new Set([
   'meta/muse-image-1.0',
   'spacexai/grok-imagine-image',
+  'spacexai/grok-imagine-image-2.0',
   'bytedance/seedream-5.0-lite',
   'bfl/flux-2-klein-9b',
   'bfl/flux-2-flex',
@@ -41,7 +42,63 @@ function parseJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
+function mediaTypeFromDataUrl(dataUrl) {
+  const match = /^data:([^;,]+)[;,]/.exec(dataUrl || '');
+  return match?.[1] || 'image/jpeg';
+}
+
+function providerMessage(error) {
+  const bodies = [
+    error?.responseBody,
+    error?.data,
+    error?.cause?.responseBody,
+    error?.cause?.data,
+  ];
+
+  for (const body of bodies) {
+    if (!body) continue;
+    if (typeof body === 'object') {
+      const message = body?.error?.message || body?.message || body?.error;
+      if (typeof message === 'string' && message.trim()) return message.trim();
+      continue;
+    }
+    if (typeof body === 'string') {
+      try {
+        const parsed = JSON.parse(body);
+        const message = parsed?.error?.message || parsed?.message || parsed?.error;
+        if (typeof message === 'string' && message.trim()) return message.trim();
+      } catch {
+        if (body.trim()) return body.trim().slice(0, 500);
+      }
+    }
+  }
+
+  return error?.cause?.message || null;
+}
+
+function describeError(error) {
+  return {
+    name: error?.name || 'Error',
+    message: error?.message || 'Request failed',
+    statusCode: error?.statusCode || error?.cause?.statusCode || null,
+    providerMessage: providerMessage(error),
+    retryable: error?.isRetryable ?? error?.cause?.isRetryable ?? null,
+  };
+}
+
+function userFacingError(error) {
+  const details = describeError(error);
+  const message = details.providerMessage || details.message;
+  const status = details.statusCode ? ` (${details.statusCode})` : '';
+  return `${message}${status}`;
+}
+
 function buildImagePrompt(option, preferences, trimCadence, stylingLevel, photos) {
+  const referenceImages = photos
+    .filter((photo) => photo?.dataUrl)
+    .slice(0, 3)
+    .map((photo) => photo.dataUrl);
+
   return {
     text: [
       'Create a realistic first-haircut preview of the SAME child shown in the reference images.',
@@ -55,7 +112,7 @@ function buildImagePrompt(option, preferences, trimCadence, stylingLevel, photos
       'Keep the haircut age-appropriate for a 3-year-old and salon-feasible.',
       'Photorealistic head-and-shoulders portrait. Do not add accessories or alter facial features.'
     ].join(' '),
-    images: photos.map((photo) => photo.dataUrl).filter(Boolean),
+    images: referenceImages,
   };
 }
 
@@ -63,7 +120,6 @@ async function renderOptionImage(option, photos, body, imageModel) {
   const { image, warnings } = await generateImage({
     model: imageModel,
     prompt: buildImagePrompt(option, body.preferences, body.trimCadence, body.stylingLevel, photos),
-    aspectRatio: '4:5',
   });
 
   return {
@@ -76,11 +132,14 @@ async function renderOptionImage(option, photos, body, imageModel) {
 }
 
 export async function POST(request) {
+  let analysisModel = DEFAULT_ANALYSIS_MODEL;
+  let imageModel = DEFAULT_IMAGE_MODEL;
+
   try {
     const body = await request.json();
     const photos = Array.isArray(body?.photos) ? body.photos : [];
-    const analysisModel = normalizeAnalysisModel(body?.analysisModel);
-    const imageModel = normalizeImageModel(body?.imageModel);
+    analysisModel = normalizeAnalysisModel(body?.analysisModel);
+    imageModel = normalizeImageModel(body?.imageModel);
 
     if (!photos.length) {
       return Response.json({
@@ -96,7 +155,11 @@ export async function POST(request) {
         type: 'text',
         text: `Evaluate these first-haircut references. Photo slots: ${photos.map((photo) => photo.slot).join(', ')}. Preferences: ${(body.preferences || []).join(', ') || 'advisor choice'}. Trim cadence: ${body.trimCadence || 'not specified'}. Styling: ${body.stylingLevel || 'not specified'}.\n\nReturn ONLY valid JSON, no markdown. If visual information is insufficient: {"status":"need_more_input","message":"...","missing":["..."]}. If sufficient: {"status":"ready","message":"...","observations":["..."],"options":[{"name":"...","reason":"..."},{"name":"...","reason":"..."},{"name":"...","reason":"..."},{"name":"...","reason":"..."}]}.`
       },
-      ...photos.map((photo) => ({ type: 'image', image: photo.dataUrl }))
+      ...photos.map((photo) => ({
+        type: 'file',
+        data: photo.dataUrl,
+        mediaType: mediaTypeFromDataUrl(photo.dataUrl),
+      }))
     ];
 
     const { text } = await generateText({
@@ -115,10 +178,22 @@ export async function POST(request) {
       limitedOptions.map((option) => renderOptionImage(option, photos, body, imageModel))
     );
 
-    const options = settled.map((result, index) => result.status === 'fulfilled'
-      ? result.value
-      : { ...limitedOptions[index], imageError: result.reason?.message || 'Image generation failed for this option.' }
-    );
+    const options = settled.map((result, index) => {
+      if (result.status === 'fulfilled') return result.value;
+
+      const details = describeError(result.reason);
+      console.error('First Cut image generation failed', {
+        model: imageModel,
+        option: limitedOptions[index]?.name,
+        ...details,
+      });
+
+      return {
+        ...limitedOptions[index],
+        imageError: userFacingError(result.reason),
+        imageErrorCode: details.name,
+      };
+    });
 
     const failures = options.filter((option) => option.imageError).length;
     return Response.json({
@@ -134,7 +209,17 @@ export async function POST(request) {
       options,
     });
   } catch (error) {
-    console.error(error);
-    return Response.json({ status: 'error', message: error?.message || 'Agent failed' }, { status: 500 });
+    const details = describeError(error);
+    console.error('First Cut request failed', {
+      analysisModel,
+      imageModel,
+      ...details,
+    });
+    return Response.json({
+      status: 'error',
+      message: userFacingError(error),
+      analysisModelUsed: analysisModel,
+      imageModelUsed: imageModel,
+    }, { status: 500 });
   }
 }
