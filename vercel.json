@@ -1,5 +1,0 @@
-{
-  "functions": {
-    "app/api/haircut/route.js": { "maxDuration": 180 }
-  }
-}
