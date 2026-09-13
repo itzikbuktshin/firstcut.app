@@ -1,0 +1,11 @@
+{
+  "name": "firstcut-haircut-advisor",
+  "private": true,
+  "scripts": {"build": "next build"},
+  "dependencies": {
+    "ai": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  }
+}
