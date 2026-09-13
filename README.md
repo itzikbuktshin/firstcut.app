@@ -16,10 +16,16 @@ Analysis:
 
 Image generation:
 - `meta/muse-image-1.0`
-- `bfl/flux-2-klein-9b`
+- `spacexai/grok-imagine-image`
 - `bytedance/seedream-5.0-lite`
+- `bfl/flux-2-klein-9b`
+- `bfl/flux-2-flex`
 - `bfl/flux-2-pro`
 - `bfl/flux-2-max`
+- `openai/gpt-image-1.5`
+- `openai/gpt-image-2`
+- `openai/gpt-image-2.5-sunburst`
+- `openai/gpt-image-2.5-flare`
 
 ## Development
 
